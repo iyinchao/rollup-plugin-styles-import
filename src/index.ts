@@ -18,11 +18,13 @@ import {
   ensurePCSSOption,
   ensurePCSSPlugins,
 } from "./utils/options";
+import { EXTRACT_PREFIX } from "./utils/consts";
 
 export default (options: Options = {}): Plugin => {
   const isIncluded = createFilter(options.include, options.exclude);
 
   const sourceMap = inferSourceMapOption(options.sourceMap);
+  const extractKeepImport = inferOption(options.extractKeepImport, true) as boolean;
   const loaderOpts: PostCSSLoaderOptions = {
     ...inferModeOption(options.mode),
 
@@ -31,6 +33,7 @@ export default (options: Options = {}): Plugin => {
     import: inferHandlerOption(options.import, options.alias),
     url: inferHandlerOption(options.url, options.alias),
     modules: inferOption(options.modules, false),
+    extractKeepImport,
 
     to: options.to,
     dts: options.dts ?? false,
@@ -39,6 +42,7 @@ export default (options: Options = {}): Plugin => {
     extensions: options.extensions ?? [".css", ".pcss", ".postcss", ".sss"],
     postcss: {},
   };
+
 
   if (
     typeof loaderOpts.inject === "object" &&
@@ -66,6 +70,19 @@ export default (options: Options = {}): Plugin => {
 
   const plugin: Plugin = {
     name: "styles",
+
+    resolveId(source) {
+      if (extractKeepImport && source?.startsWith(EXTRACT_PREFIX) &&
+        extracted.some(({ id }) => id === source.slice(EXTRACT_PREFIX.length))) {
+        return {
+          id: source,
+          external: true,
+          moduleSideEffects: true,
+        }
+      }
+
+      return null;
+    },
 
     async transform(code, id) {
       if (!isIncluded(id) || !loaders.isSupported(id)) return null;
@@ -266,6 +283,12 @@ export default (options: Options = {}): Plugin => {
         }
       }
 
+      const emittedFiles: {
+        name: string;
+        ids: string[];
+        cssFileId: string,
+        cssFileName: string;
+      }[] = [];
       for await (const [name, ids] of emittedList) {
         const res = await getExtractedData(name, ids);
 
@@ -296,6 +319,12 @@ export default (options: Options = {}): Plugin => {
 
         const cssFile = { type: "asset" as const, name: res.name, source: res.css };
         const cssFileId = this.emitFile(cssFile);
+        emittedFiles.push({
+          name,
+          ids: [...new Set(ids)],
+          cssFileId,
+          cssFileName: this.getFileName(cssFileId),
+        })
 
         if (res.map && sourceMap) {
           const fileName = this.getFileName(cssFileId);
@@ -304,8 +333,8 @@ export default (options: Options = {}): Plugin => {
             typeof opts.assetFileNames === "string"
               ? normalizePath(path.dirname(opts.assetFileNames))
               : typeof opts.assetFileNames === "function"
-              ? normalizePath(path.dirname(opts.assetFileNames(cssFile)))
-              : "assets"; // Default for Rollup v2
+                ? normalizePath(path.dirname(opts.assetFileNames(cssFile)))
+                : "assets"; // Default for Rollup v2
 
           const map = mm(res.map)
             .modify(m => (m.file = path.basename(fileName)))
@@ -330,6 +359,103 @@ export default (options: Options = {}): Plugin => {
           }
         }
       }
+
+      Object.keys(bundle).filter((fileName) => {
+        const fileInfo = bundle[fileName];
+        if (fileInfo.type === 'asset') {
+          return;
+        }
+
+        const importedIdList = fileInfo.imports.filter((importStr) => importStr.startsWith(EXTRACT_PREFIX)).map((importStr) => importStr.slice(EXTRACT_PREFIX.length));
+
+        // match emitted files
+        let matchedEmitted = emittedFiles.filter(({ ids }) => {
+          return ids.every((id) => importedIdList.includes(id));
+        });
+
+        // if has multiple matched, then find if they have subset relationship
+        if (matchedEmitted.length > 1) {
+          const sameIdSets: number[][] = [];
+          const removedItemIndex: number[] = [];
+          for (const [index, item] of matchedEmitted.entries()) {
+            const others = matchedEmitted.filter((_, idx) => idx !== index);
+
+            for (const other of others) {
+              if (item.ids.length > other.ids.length) {
+                // not
+                continue;
+              }
+
+              const otherIndex = matchedEmitted.indexOf(other);
+
+              if (item.ids.every(val => other.ids.includes(val))) {
+                if (item.ids.length === other.ids.length) {
+                  // is same
+                  let sameSet = sameIdSets.find((sameIdSet) => {
+                    return sameIdSet.includes(index) || sameIdSet.includes(otherIndex)
+                  });
+                  if (!sameSet) {
+                    sameSet = [index, otherIndex];
+                    sameIdSets.push(sameSet);
+                  } else {
+                    if (!sameSet.includes(index)) {
+                      sameSet.push(index);
+                    }
+                  }
+                } else {
+                  // is subset
+                  removedItemIndex.push(index);
+                  break;
+                }
+              }
+              // not, continue
+            }
+          }
+          for (const sameSet of sameIdSets) {
+            const indexList = sameSet.filter((idx) => idx < 0);
+            for (const index of indexList.slice(1)) {
+              removedItemIndex.push(index);
+            }
+          }
+
+          matchedEmitted = matchedEmitted.filter((_, index) => {
+            return !removedItemIndex.includes(index);
+          })
+        }
+
+        const rewriteImports = [];
+        const rewritedFiles: string[] = [];
+        for (const importStr of fileInfo.imports) {
+          if (importStr.startsWith(EXTRACT_PREFIX)) {
+            const found = matchedEmitted.find((item) => {
+              const foundId = item.ids.find((id) => id === importStr.slice(EXTRACT_PREFIX.length));
+
+              return !!foundId;
+            });
+
+            if (found) {
+              const cssFileName = found.cssFileName;
+              const isRewrited = rewritedFiles.includes(cssFileName);
+              rewriteImports.push({
+                source: importStr,
+                target: !isRewrited ? cssFileName : null
+              });
+
+              rewritedFiles.push(cssFileName);
+            }
+          }
+        }
+
+        // modify code
+        for (const rewrite of rewriteImports) {
+          if (rewrite.target) {
+            const dir = path.relative(path.dirname(fileInfo.fileName), path.dirname(rewrite.target));
+            fileInfo.code = fileInfo.code.replace(rewrite.source, (dir ? '' : `.${path.sep}`) + path.join(dir, path.basename(rewrite.target)));
+          } else {
+            fileInfo.code = fileInfo.code.replace(`import '${rewrite.source}';\n`, '');
+          }
+        }
+      });
     },
   };
 

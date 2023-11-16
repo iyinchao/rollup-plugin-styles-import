@@ -36,6 +36,8 @@ export interface PostCSSLoaderOptions extends Record<string, unknown> {
   inject: boolean | InjectOptions | ((varname: string, id: string) => string);
   /** @see {@link Options.mode} */
   extract: boolean | string;
+  /** @see {@link Options.extractKeepImport} */
+  extractKeepImport: boolean;
   /** @see {@link Options.mode} */
   emit: boolean;
 
@@ -121,15 +123,15 @@ export interface Options {
    * which are used before plugins loaded from PostCSS config file, if any
    */
   plugins?:
-    | Record<string, unknown>
-    | (
-        | postcss.AcceptedPlugin
-        | string
-        | [string | postcss.PluginCreator<unknown>]
-        | [string | postcss.PluginCreator<unknown>, Record<string, unknown>]
-        | null
-        | undefined
-      )[];
+  | Record<string, unknown>
+  | (
+    | postcss.AcceptedPlugin
+    | string
+    | [string | postcss.PluginCreator<unknown>]
+    | [string | postcss.PluginCreator<unknown>, Record<string, unknown>]
+    | null
+    | undefined
+  )[];
   /**
    * Select mode for this plugin:
    * - `"inject"` *(default)* - Embeds CSS inside JS and injects it into `<head>` at runtime.
@@ -144,14 +146,19 @@ export interface Options {
    * @default "inject"
    */
   mode?:
-    | "inject"
-    | ["inject"]
-    | ["inject", InjectOptions | ((varname: string, id: string) => string)]
-    | "extract"
-    | ["extract"]
-    | ["extract", string]
-    | "emit"
-    | ["emit"];
+  | "inject"
+  | ["inject"]
+  | ["inject", InjectOptions | ((varname: string, id: string) => string)]
+  | "extract"
+  | ["extract"]
+  | ["extract", string]
+  | "emit"
+  | ["emit"];
+  /**
+   * Keep import statement of extracted css file
+   * @default true
+   */
+  extractKeepImport?: boolean;
   /** `to` option for PostCSS, required for some plugins */
   to?: string;
   /**
@@ -200,7 +207,7 @@ export interface Options {
    * [cssnano](https://github.com/cssnano/cssnano)
    * @default false
    */
-  minimize?: boolean | cssnano.CssNanoOptions;
+  minimize?: boolean | cssnano.Options;
   /**
    * Enable/disable or configure sourcemaps
    * @default false

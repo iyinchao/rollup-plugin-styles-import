@@ -6,6 +6,7 @@ import postcss, { AcceptedPlugin, ProcessOptions } from "postcss";
 import cssnano from "cssnano";
 import { PostCSSLoaderOptions, InjectOptions } from "../../types";
 import { humanlizePath, normalizePath } from "../../utils/path";
+import { EXTRACT_PREFIX } from "../../utils/consts";
 import { mm } from "../../utils/sourcemap";
 import { resolveAsync } from "../../utils/resolve";
 import safeId from "../../utils/safe-id";
@@ -151,7 +152,16 @@ const loader: Loader<PostCSSLoaderOptions> = {
       }
     }
 
-    if (options.extract) extracted = { id: this.id, css: res.css, map };
+    if (options.extract) {
+      extracted = { id: this.id, css: res.css, map };
+
+      /**
+       * adds a import statement as side effect
+       */
+      if (options.extractKeepImport) {
+        output.unshift(`import '${EXTRACT_PREFIX}${this.id}'`);
+      }
+    }
 
     if (options.inject) {
       if (typeof options.inject === "function") {
